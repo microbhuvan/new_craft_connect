@@ -1,361 +1,322 @@
-const { VertexAI } = require('@google-cloud/vertexai');
+const { SpeechClient } = require('@google-cloud/speech');
+const { PredictionServiceClient } = require('@google-cloud/aiplatform');
+const { ImageAnnotatorClient } = require('@google-cloud/vision');
+const mongoose = require('mongoose');
+const BusinessSession = require('../models/BusinessSession');
 const Product = require('../models/Product');
-const { uploadBase64Image, generateFilename, imageUrlToBase64 } = require('../utils/storage');
 
-// Initialize Vertex AI
-let vertexAI = null;
-let textModel = null;
-let imageModel = null;
+// Initialize Google Cloud clients
+const speechClient = new SpeechClient();
+const visionClient = new ImageAnnotatorClient();
+const aiplatformClient = new PredictionServiceClient({
+  apiEndpoint: 'us-central1-aiplatform.googleapis.com',
+});
 
-try {
-  vertexAI = new VertexAI({
-    project: process.env.GOOGLE_PROJECT_ID,
-    location: process.env.GOOGLE_LOCATION || 'us-central1',
-  });
-  
-  // Text model for product summary
-  textModel = vertexAI.getGenerativeModel({
-    model: process.env.VERTEX_MODEL || 'gemini-1.5-flash',
-  });
-  
-  // Image model for enhancement (Nano Banana!)
-  imageModel = vertexAI.getGenerativeModel({
-    model: 'gemini-2.5-flash-image'
-  });
-  
-  console.log('✅ Vertex AI models initialized successfully');
-} catch (error) {
-  console.error('❌ Failed to initialize Vertex AI:', error.message);
-}
+// Step 3: Comprehensive Product Analysis (Voice + Images)
+exports.analyzeComprehensive = async (req, res) => {
+  try {
+    console.log('🎨 Starting comprehensive product analysis...');
 
-/**
- * Generate product summary using Gemini
- * @param {string} transcript - Voice transcript
- * @param {Object} vision - Vision AI results
- * @returns {Promise<Object>} - Product AI summary
- */
-async function generateProductSummary(transcript, vision) {
-  if (!textModel) {
-    console.warn('⚠️ Text model not available, returning fallback summary');
-    return {
-      productName: 'Handmade Craft Product',
-      description: 'A beautiful handmade product crafted with care and attention to detail.',
-      bulletPoints: [
-        'Handmade with premium materials',
-        'Unique design and craftsmanship',
-        'Perfect for gifts or personal use'
-      ],
-      priceSuggestion: 45,
-      tags: ['handmade', 'craft', 'artisan'],
-      category: 'Crafts'
-    };
-  }
+    const { sessionId } = req.body;
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID required' });
+    }
 
-  const labels = vision.labels ? vision.labels.join(', ') : 'craft product';
-  const colors = vision.colors ? vision.colors.map(c => c.color).join(', ') : 'mixed colors';
-  
-  const prompt = `
-You are an expert product marketing specialist. Create a compelling product listing based on this information:
+    const session = await BusinessSession.findById(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
 
-**Voice Description:**
-"${transcript}"
+    let productTranscript = '';
+    let imageAnalyses = [];
 
-**Visual Analysis:**
-- Detected objects: ${labels}
-- Dominant colors: ${colors}
-- Text in image: ${vision.text || 'none'}
+    // Process audio if provided
+    if (req.files && req.files.audio && req.files.audio[0]) {
+      console.log('🎤 Processing product audio description...');
+      
+      const audioBytes = req.files.audio[0].buffer.toString('base64');
+      const speechRequest = {
+        audio: { content: audioBytes },
+        config: {
+          encoding: 'WEBM_OPUS',
+          sampleRateHertz: 48000,
+          languageCode: 'en-US',
+          enableAutomaticPunctuation: true,
+          model: 'latest_long',
+        },
+      };
 
-**Instructions:**
-Return a JSON object with these fields:
+      const [response] = await speechClient.recognize(speechRequest);
+      productTranscript = response.results
+        ?.map(result => result.alternatives[0]?.transcript)
+        .join(' ') || '';
+
+      console.log('📝 Product transcript:', productTranscript);
+    }
+
+    // Process images if provided
+    if (req.files && req.files.images) {
+      console.log(`📸 Processing ${req.files.images.length} product images...`);
+      
+      for (let i = 0; i < req.files.images.length; i++) {
+        const imageFile = req.files.images[i];
+        
+        try {
+          // Analyze image with Vision API
+          const visionRequest = {
+            image: { content: imageFile.buffer.toString('base64') },
+            features: [
+              { type: 'LABEL_DETECTION', maxResults: 10 },
+              { type: 'OBJECT_LOCALIZATION', maxResults: 10 },
+              { type: 'TEXT_DETECTION' },
+              { type: 'IMAGE_PROPERTIES' },
+              { type: 'SAFE_SEARCH_DETECTION' }
+            ],
+          };
+
+          const [visionResponse] = await visionClient.annotateImage(visionRequest);
+          
+          const analysis = {
+            imageIndex: i + 1,
+            labels: visionResponse.labelAnnotations?.map(label => ({
+              description: label.description,
+              score: label.score
+            })) || [],
+            objects: visionResponse.localizedObjectAnnotations?.map(obj => ({
+              name: obj.name,
+              score: obj.score
+            })) || [],
+            text: visionResponse.textAnnotations?.[0]?.description || '',
+            colors: visionResponse.imagePropertiesAnnotation?.dominantColors?.colors?.slice(0, 5).map(color => ({
+              red: color.color?.red || 0,
+              green: color.color?.green || 0,
+              blue: color.color?.blue || 0,
+              score: color.score
+            })) || []
+          };
+
+          imageAnalyses.push(analysis);
+          console.log(`✅ Image ${i + 1} analyzed successfully`);
+        } catch (error) {
+          console.error(`❌ Error analyzing image ${i + 1}:`, error);
+          imageAnalyses.push({
+            imageIndex: i + 1,
+            error: 'Failed to analyze image',
+            details: error.message
+          });
+        }
+      }
+    }
+
+    // Combine business context with product information for comprehensive analysis
+    const comprehensiveAnalysisPrompt = `
+Analyze this craft product with both business context and detailed product information:
+
+BUSINESS CONTEXT:
+${JSON.stringify(session.businessSummary, null, 2)}
+
+PRODUCT VOICE DESCRIPTION:
+"${productTranscript}"
+
+IMAGE ANALYSIS RESULTS:
+${JSON.stringify(imageAnalyses, null, 2)}
+
+Provide a comprehensive JSON response with:
 {
-  "productName": "A catchy, SEO-friendly product name (max 60 chars)",
-  "description": "Compelling 2-3 sentence description highlighting uniqueness and benefits",
-  "bulletPoints": ["3-5 key selling points as short bullet points"],
-  "priceSuggestion": "Suggested price as a number (USD)",
-  "tags": ["5-8 relevant tags for searchability"],
-  "category": "Product category (e.g., 'Home Decor', 'Jewelry', 'Art')"
-}
-
-**Important:** Return ONLY the JSON object, no other text.
-`;
-
-  try {
-    const result = await textModel.generateContent({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.3,
-        maxOutputTokens: 1024,
-      }
-    });
-
-    const responseText = result.response.candidates[0].content.parts[0].text;
-    console.log('Raw AI response:', responseText);
-    
-    // Clean and parse JSON
-    const cleanJson = responseText
-      .replace(/```json\s*|\s*```/g, '')
-      .replace(/^[^{]*/, '')
-      .replace(/[^}]*$/, '}');
-    
-    const parsed = JSON.parse(cleanJson);
-    
-    // Validate and provide defaults
-    return {
-      productName: parsed.productName || 'Handmade Craft Product',
-      description: parsed.description || 'A beautiful handmade product.',
-      bulletPoints: Array.isArray(parsed.bulletPoints) ? parsed.bulletPoints : [
-        'Handmade with care',
-        'Unique design',
-        'Quality materials'
-      ],
-      priceSuggestion: typeof parsed.priceSuggestion === 'number' ? parsed.priceSuggestion : 45,
-      tags: Array.isArray(parsed.tags) ? parsed.tags : ['handmade', 'craft'],
-      category: parsed.category || 'Crafts'
-    };
-    
-  } catch (error) {
-    console.error('❌ Product summary generation error:', error.message);
-    
-    // Fallback summary
-    return {
-      productName: 'Handmade Craft Product',
-      description: 'A unique handmade product created with attention to detail.',
-      bulletPoints: [
-        'Handcrafted with premium materials',
-        'One-of-a-kind design',
-        'Perfect for home or gifting'
-      ],
-      priceSuggestion: 45,
-      tags: ['handmade', 'craft', 'artisan', 'unique'],
-      category: 'Crafts'
-    };
+  "productSummary": {
+    "name": "product name",
+    "category": "product category",
+    "materials": ["material1", "material2"],
+    "techniques": ["technique1", "technique2"],
+    "uniqueFeatures": ["feature1", "feature2"],
+    "qualityLevel": "beginner/intermediate/professional",
+    "timeToMake": "estimated time",
+    "difficulty": "easy/medium/hard"
+  },
+  "visualAnalysis": {
+    "overallAppearance": "description",
+    "colorScheme": ["color1", "color2"],
+    "craftsmanship": "assessment of quality",
+    "marketAppeal": "how appealing to customers",
+    "photographyQuality": "assessment of photos",
+    "improvementSuggestions": ["suggestion1", "suggestion2"]
+  },
+  "marketingInsights": {
+    "targetAudience": "who would buy this",
+    "pricingRange": "suggested price range",
+    "sellingPoints": ["point1", "point2"],
+    "competitiveAdvantage": "what makes it special",
+    "seasonality": "best time to sell"
+  },
+  "digitalMarketingStrategy": {
+    "instagramHashtags": ["#tag1", "#tag2", "#tag3"],
+    "keywordFocus": ["keyword1", "keyword2"],
+    "contentAngles": ["angle1", "angle2"],
+    "platformSuitability": {
+      "instagram": "why good/bad for Instagram",
+      "facebook": "why good/bad for Facebook",
+      "whatsapp": "why good/bad for WhatsApp marketing",
+      "website": "why good/bad for website"
+    }
+  },
+  "recommendations": {
+    "immediate": ["action1", "action2"],
+    "shortTerm": ["action1", "action2"],
+    "longTerm": ["action1", "action2"]
   }
 }
 
-/**
- * Enhance image using Gemini 2.5 Flash Image (Nano Banana)
- * @param {string} originalImageUrl - Cloudinary URL of original image
- * @param {string} productName - Product name for context
- * @returns {Promise<string>} - Enhanced image URL
- */
-async function enhanceProductImage(originalImageUrl, productName) {
-  if (!imageModel) {
-    console.warn('⚠️ Image model not available, returning original image');
-    return originalImageUrl;
-  }
+Be specific and actionable. Use the business context to make personalized recommendations.`;
 
-  try {
-    console.log('Enhancing image with Gemini 2.5 Flash Image...');
+    console.log('🤖 Sending to Vertex AI for comprehensive analysis...');
+
+    const vertexRequest = {
+      endpoint: `projects/${process.env.GOOGLE_PROJECT_ID}/locations/us-central1/publishers/google/models/gemini-1.5-flash-002`,
+      instances: [{ content: comprehensiveAnalysisPrompt }],
+      parameters: {
+        temperature: 0.4,
+        maxOutputTokens: 4096,
+        topP: 0.8,
+        topK: 40,
+      },
+    };
+
+    const [aiResponse] = await aiplatformClient.predict(vertexRequest);
+    const aiContent = aiResponse.predictions[0]?.content || '';
     
-    // Convert image URL to base64 for the model
-    const imageBase64 = await imageUrlToBase64(originalImageUrl);
+    // Extract JSON from AI response
+    const jsonMatch = aiContent.match(/\{[\s\S]*\}/);
+    let productAnalysis;
     
-    const enhancementPrompt = `Transform this product image into professional e-commerce quality:
-
-- Clean, minimal white or neutral background
-- Professional lighting with soft shadows
-- Sharp focus on the product details  
-- Remove any clutter or distracting elements
-- Maintain the authentic look and colors of the product
-- High-resolution marketplace photography style
-
-Product: ${productName}
-Style: Professional product photography for online marketplace`;
-
-    const result = await imageModel.generateContent({
-      contents: [{
-        role: 'user',
-        parts: [
-          {
-            inline_data: {
-              mime_type: 'image/jpeg',
-              data: imageBase64
-            }
-          },
-          {
-            text: enhancementPrompt
-          }
-        ]
-      }],
-      generationConfig: {
-        temperature: 0.1, // Low temperature for consistent professional results
+    if (jsonMatch) {
+      try {
+        productAnalysis = JSON.parse(jsonMatch[0]);
+      } catch (error) {
+        console.error('Error parsing product analysis JSON:', error);
+        productAnalysis = { error: 'Failed to parse AI response', rawResponse: aiContent };
       }
-    });
-
-    // Extract the enhanced image
-    const enhancedImagePart = result.response.candidates[0].content.parts.find(
-      part => part.inline_data && part.inline_data.mime_type.startsWith('image/')
-    );
-
-    if (!enhancedImagePart) {
-      console.warn('⚠️ No enhanced image returned, using original');
-      return originalImageUrl;
+    } else {
+      productAnalysis = { error: 'No JSON found in response', rawResponse: aiContent };
     }
 
-    // Upload enhanced image to Cloudinary
-    const enhancedBase64 = `data:${enhancedImagePart.inline_data.mime_type};base64,${enhancedImagePart.inline_data.data}`;
-    const enhancedFilename = generateFilename(productName, 'enhanced');
-    const enhancedImageUrl = await uploadBase64Image(enhancedBase64, enhancedFilename, 'products/enhanced');
-    
-    console.log('✅ Image enhanced successfully');
-    return enhancedImageUrl;
-    
-  } catch (error) {
-    console.error('❌ Image enhancement error:', error.message);
-    console.warn('⚠️ Using original image due to enhancement failure');
-    return originalImageUrl;
-  }
-}
+    // Update session with product analysis
+    session.productTranscript = productTranscript;
+    session.imageAnalyses = imageAnalyses;
+    session.productAnalysis = productAnalysis;
+    session.step = 'product_analysis_complete';
+    session.updatedAt = new Date();
+    await session.save();
 
-/**
- * Controller: Process complete product (transcript + image + vision)
- */
-exports.processProduct = async (req, res) => {
-  console.log('Product processing started');
-  
-  try {
-    const { transcript, imageUrl, vision, userId, sessionId } = req.body;
-    
-    // Validate required fields
-    if (!transcript || !imageUrl || !vision) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields',
-        message: 'transcript, imageUrl, and vision are required'
-      });
-    }
+    console.log('✅ Comprehensive product analysis complete');
 
-    console.log('Processing product with:', {
-      transcriptLength: transcript.length,
-      imageUrl: imageUrl.substring(0, 50) + '...',
-      visionLabels: vision.labels?.length || 0
-    });
-
-    // Step 1: Generate product summary
-    console.log('Step 1: Generating product summary...');
-    const aiSummary = await generateProductSummary(transcript, vision);
-    console.log('Product summary generated:', aiSummary.productName);
-
-    // Step 2: Enhance image
-    console.log('Step 2: Enhancing product image...');
-    const enhancedImageUrl = await enhanceProductImage(imageUrl, aiSummary.productName);
-    console.log('Image enhancement completed');
-
-    // Step 3: Save product to database
-    console.log('Step 3: Saving product to database...');
-    const product = new Product({
-      userId: userId || null,
-      sessionId: sessionId || null,
-      transcript,
-      originalImageUrl: imageUrl,
-      vision,
-      ai: aiSummary,
-      enhancedImageUrl,
-      status: 'ready_for_approval'
-    });
-
-    await product.save();
-    console.log('✅ Product saved with ID:', product._id);
-
-    return res.status(200).json({
+    res.json({
       success: true,
-      productId: product._id,
-      enhancedImageUrl,
-      product: {
-        id: product._id,
-        productName: aiSummary.productName,
-        description: aiSummary.description,
-        bulletPoints: aiSummary.bulletPoints,
-        priceSuggestion: aiSummary.priceSuggestion,
-        tags: aiSummary.tags,
-        category: aiSummary.category,
-        originalImageUrl: imageUrl,
-        enhancedImageUrl,
-        status: product.status
-      }
+      sessionId,
+      productTranscript,
+      imageAnalyses,
+      productAnalysis,
+      nextStep: 'generate_recommendations'
     });
-    
+
   } catch (error) {
-    console.error('❌ Error in product processing:', error);
-    
-    return res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      message: 'Failed to process product',
+    console.error('❌ Error in comprehensive product analysis:', error);
+    res.status(500).json({
+      error: 'Failed to analyze product comprehensively',
       details: error.message
     });
   }
 };
 
-/**
- * Controller: Get product by ID
- */
+// Existing functions (keeping for backward compatibility)
+exports.processProduct = async (req, res) => {
+  try {
+    console.log('🔄 Processing product with existing method...');
+    // Keep existing implementation for backward compatibility
+    // This can be the fallback method
+    
+    res.json({
+      success: true,
+      message: 'Please use the new comprehensive analysis endpoint',
+      recommendedEndpoint: '/api/products/analyze-comprehensive'
+    });
+  } catch (error) {
+    console.error('❌ Error in process product:', error);
+    res.status(500).json({
+      error: 'Failed to process product',
+      details: error.message
+    });
+  }
+};
+
 exports.getProduct = async (req, res) => {
   try {
     const { id } = req.params;
     
-    const product = await Product.findById(id);
+    // Try to find in BusinessSession first (new flow)
+    let product = await BusinessSession.findById(id);
     
     if (!product) {
-      return res.status(404).json({
-        success: false,
-        error: 'Product not found'
-      });
+      // Fallback to Product model (old flow)
+      product = await Product.findById(id);
     }
     
-    return res.status(200).json({
+    if (!product) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    res.json({
       success: true,
       product
     });
-    
   } catch (error) {
     console.error('❌ Error getting product:', error);
-    
-    return res.status(500).json({
-      success: false,
-      error: 'Internal server error',
+    res.status(500).json({
+      error: 'Failed to get product',
       details: error.message
     });
   }
 };
 
-/**
- * Controller: Approve product
- */
 exports.approveProduct = async (req, res) => {
   try {
     const { id } = req.params;
+    const { approved, feedback } = req.body;
     
-    const product = await Product.findByIdAndUpdate(
-      id,
-      {
-        approved: true,
-        approvedAt: new Date(),
-        status: 'approved'
-      },
-      { new: true }
-    );
+    // Try to find in BusinessSession first (new flow)
+    let product = await BusinessSession.findById(id);
     
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        error: 'Product not found'
-      });
+    if (product) {
+      product.productApproved = approved;
+      product.productFeedback = feedback;
+      product.step = approved ? 'ready_for_recommendations' : 'product_needs_revision';
+      product.updatedAt = new Date();
+      await product.save();
+    } else {
+      // Fallback to Product model (old flow)
+      product = await Product.findByIdAndUpdate(
+        id,
+        { 
+          approved, 
+          feedback, 
+          updatedAt: new Date() 
+        },
+        { new: true }
+      );
     }
     
-    console.log('✅ Product approved:', product._id);
-    
-    return res.status(200).json({
+    if (!product) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    res.json({
       success: true,
-      product
+      product,
+      nextStep: approved ? 'generate_recommendations' : 'revise_product'
     });
-    
   } catch (error) {
     console.error('❌ Error approving product:', error);
-    
-    return res.status(500).json({
-      success: false,
-      error: 'Internal server error',
+    res.status(500).json({
+      error: 'Failed to approve product',
       details: error.message
     });
   }
