@@ -3,6 +3,7 @@ const multer = require("multer");
 const aiController = require("../controllers/aiController");
 const imageController = require("../controllers/imageController");
 const productController = require("../controllers/productController");
+const businessController = require("../controllers/businessController");
 
 const router = express.Router();
 
@@ -12,7 +13,38 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
 });
 
-// --- EXISTING API ENDPOINTS ---
+// --- ENHANCED FLOW API ENDPOINTS ---
+
+// Step 1: Business Overview Analysis (Voice Recording)
+router.post(
+  "/business/analyze-overview",
+  upload.single("audio"),
+  businessController.analyzeBusinessOverview
+);
+
+// Step 2: Business Summary Validation
+router.post(
+  "/business/validate-summary",
+  businessController.validateBusinessSummary
+);
+
+// Step 3: Comprehensive Product Analysis (Voice + Images)
+router.post(
+  "/products/analyze-comprehensive",
+  upload.fields([
+    { name: 'audio', maxCount: 1 },
+    { name: 'images', maxCount: 10 }
+  ]),
+  productController.analyzeComprehensive
+);
+
+// Step 4: Generate Final Recommendations
+router.post(
+  "/recommendations/generate",
+  businessController.generateRecommendations
+);
+
+// --- EXISTING API ENDPOINTS (for backward compatibility) ---
 
 // Handles audio analysis (Speech-to-Text and Vertex AI)
 router.post(
@@ -28,7 +60,7 @@ router.post(
   aiController.generateWhatsAppMessage
 );
 
-// --- NEW API ENDPOINTS ---
+// --- ADDITIONAL API ENDPOINTS ---
 
 // Image upload and Vision AI analysis
 router.post(
@@ -52,6 +84,17 @@ router.get(
 router.post(
   "/products/:id/approve",
   productController.approveProduct
+);
+
+// Session management for multi-step flow
+router.get(
+  "/session/:sessionId",
+  businessController.getSession
+);
+
+router.post(
+  "/session/:sessionId/update",
+  businessController.updateSession
 );
 
 module.exports = router;
