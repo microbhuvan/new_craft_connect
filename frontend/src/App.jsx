@@ -9,12 +9,12 @@ import AnalyzeProductImagePage from "./pages/AnalyzeProductImagePage";
 import ArtisanHubPage from "./pages/ArtisanHubPage";
 import SmartProductEnhancerPage from "./pages/SmartProductEnhancerPage";
 import QuotationResultPage from "./pages/QuotationResultPage";
-import InstagramReviewPostPage from "./pages/InstagramReviewPostPage";
 import WhatsAppSendPage from "./pages/WhatsAppSendPage";
 import ShopifyLaunchPage from "./pages/ShopifyLaunchPage";
 import BusinessOverviewPage from "./pages/BusinessOverviewPage";
 import BusinessSummaryPage from "./pages/BusinessSummaryPage";
 import ProductAnalysisPage from "./pages/ProductAnalysisPage";
+import FacebookPostPage from "./pages/FacebookPostPage";
 import Layout from "./components/Layout";
 
 function App() {
@@ -32,6 +32,9 @@ function App() {
           <Route path="/business-summary" element={<BusinessSummaryPage />} />
           <Route path="/product-analysis" element={<ProductAnalysisPage />} />
 
+          {/* Posting pages */}
+          <Route path="/facebook-post" element={<FacebookPostPage />} />
+
           {/* Existing routes */}
           <Route path="/" element={<HomePage />} />
           <Route path="/insights" element={<InsightsPage />} />
@@ -43,7 +46,6 @@ function App() {
           <Route path="/hub" element={<ArtisanHubPage />} />
           <Route path="/enhancer" element={<SmartProductEnhancerPage />} />
           <Route path="/quotation" element={<QuotationResultPage />} />
-          <Route path="/instagram-post" element={<InstagramReviewPostPage />} />
           <Route path="/whatsapp-send" element={<WhatsAppSendPage />} />
           <Route path="/shopify-launch" element={<ShopifyLaunchPage />} />
         </Routes>
