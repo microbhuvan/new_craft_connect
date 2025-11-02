@@ -12,18 +12,27 @@ import QuotationResultPage from "./pages/QuotationResultPage";
 import InstagramReviewPostPage from "./pages/InstagramReviewPostPage";
 import WhatsAppSendPage from "./pages/WhatsAppSendPage";
 import ShopifyLaunchPage from "./pages/ShopifyLaunchPage";
+import BusinessOverviewPage from "./pages/BusinessOverviewPage";
+import BusinessSummaryPage from "./pages/BusinessSummaryPage";
+import ProductAnalysisPage from "./pages/ProductAnalysisPage";
 import Layout from "./components/Layout";
 
 function App() {
   return (
     <Router
-          future={{
-            v7_startTransition: true,
-            v7_relativeSplatPath: true,
-          }}
-        >
+      future={{
+        v7_startTransition: true,
+        v7_relativeSplatPath: true,
+      }}
+    >
       <Layout>
         <Routes>
+          {/* Wizard flow */}
+          <Route path="/business-overview" element={<BusinessOverviewPage />} />
+          <Route path="/business-summary" element={<BusinessSummaryPage />} />
+          <Route path="/product-analysis" element={<ProductAnalysisPage />} />
+
+          {/* Existing routes */}
           <Route path="/" element={<HomePage />} />
           <Route path="/insights" element={<InsightsPage />} />
           <Route path="/whatsapp" element={<WhatsAppPage />} />
